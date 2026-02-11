@@ -19,12 +19,61 @@ A high-performance Python FastAPI microservice that provides the "Intelligence" 
 
 ## ✨ Features
 
-- **🔄 RAG (Retrieval Augmented Generation)**: Context-aware responses using case-specific facts
+- **🎭 Dual-Agent System**: Intelligent role-switching between Lawyer and Judge based on user behavior
+  - **Lawyer Agent**: Acts as opposing counsel, challenges arguments, presents counter-evidence
+  - **Judge Agent**: Monitors for errors and intervenes with corrections and guidance
+- **🔄 Dual-RAG Architecture**: Two separate vector databases for comprehensive legal training
+  - **Case-Specific RAG**: Facts, evidence, and details from the current case
+  - **Legal Laws RAG**: Constitutional laws, procedures, and guidelines
+- **🧠 Error Detection**: AI automatically detects factual and legal errors to trigger Judge intervention
 - **🗄️ Qdrant Vector Database**: High-performance vector storage and similarity search
-- **🤖 OpenAI Integration**: GPT-4o for intelligent legal reasoning
+- **🤖 OpenAI Integration**: GPT-3.5-turbo for fast, intelligent legal reasoning
 - **📊 Performance Analysis**: Automated grading and feedback generation
 - **⚡ Async FastAPI**: High-performance async endpoints
 - **🔌 Easy Integration**: RESTful API for seamless Node.js integration
+
+## 🎭 How the Dual-Agent System Works
+
+The AI Engine features an intelligent dual-agent system that creates a realistic legal training environment:
+
+### Agent Roles
+
+1. **Lawyer (Opposing Counsel)**
+   - Challenges user's arguments
+   - Presents counter-evidence from case facts
+   - Acts as prosecution
+   - Responds when user makes valid legal moves
+
+2. **Judge (Neutral Arbiter)**
+   - Monitors conversation for errors
+   - Intervenes when user makes mistakes
+   - Provides educational corrections
+   - Cites constitutional laws and procedures
+
+### Intelligent Role Switching
+
+On each user turn:
+```
+User Statement → Error Detection → Agent Selection → Response Generation
+                       ↓                    ↓
+                  Factual Error?      Judge Intervenes
+                  Legal Error?              ↓
+                       ↓              Cites Legal Authority
+                  No Errors                 +
+                       ↓           Educational Correction
+                Lawyer Responds
+```
+
+**Examples:**
+
+| User Statement | Agent | Reason |
+|----------------|-------|--------|
+| "I want to present an alibi defense." | Lawyer | Valid legal strategy |
+| "The video shows my client at the library." (when no such video exists) | Judge | Factual error - misrepresenting evidence |
+| "I'll force my client to testify." | Judge | Legal error - violates Fifth Amendment |
+| "Let me question the reliability of GPS data." | Lawyer | Valid challenge to evidence |
+
+This design helps users learn from mistakes while building practical advocacy skills.
 
 ## 📋 Prerequisites
 
@@ -115,7 +164,31 @@ GET /
 }
 ```
 
-### 2. Initialize Case
+### 2. Initialize Legal Laws
+```http
+POST /api/ai/init_legal_laws
+```
+
+**Request:**
+```json
+{
+  "legal_text": "Article I: Right to Legal Counsel...",
+  "collection_name": "legal_laws"
+}
+```
+
+**Response:**
+```json
+{
+  "message": "Legal laws vectorized successfully",
+  "collection_name": "legal_laws",
+  "chunks_processed": 42
+}
+```
+
+*Note: Call this once at application startup to load constitutional laws and procedures.*
+
+### 3. Initialize Case
 ```http
 POST /api/ai/init_case
 ```
@@ -136,7 +209,7 @@ POST /api/ai/init_case
 }
 ```
 
-### 3. Chat Turn
+### 4. Chat Turn (Dual-Agent System)
 ```http
 POST /api/ai/turn
 ```
@@ -145,24 +218,34 @@ POST /api/ai/turn
 ```json
 {
   "case_id": "case_123",
-  "user_text": "My client was not at the scene.",
-  "history": [
-    {"role": "user", "content": "I move to dismiss..."},
-    {"role": "assistant", "content": "Motion denied..."}
-  ]
+  "user_statement": "I believe the GPS evidence is unreliable.",
+  "turn_number": 1
 }
 ```
 
-**Response:**
+**Response (Lawyer):**
 ```json
 {
-  "reply_text": "Objection! GPS data shows your client at the scene at 10:43 PM.",
-  "speaker": "Lawyer",
-  "emotion": "Aggressive"
+  "agent_role": "lawyer",
+  "agent_response": "While you raise an interesting point, the GPS data shows consistent positioning...",
+  "case_context_used": "GPS data from phone records",
+  "legal_context_used": "GPS and Electronic Evidence standards",
+  "errors_detected": false
 }
 ```
 
-### 4. Analyze Performance
+**Response (Judge - when error detected):**
+```json
+{
+  "agent_role": "judge",
+  "agent_response": "Counselor! You cannot coach witnesses. That violates legal ethics...",
+  "case_context_used": "",
+  "legal_context_used": "Attorney Conduct standards; Fifth Amendment",
+  "errors_detected": true
+}
+```
+
+### 5. Analyze Performance
 ```http
 POST /api/ai/analyze
 ```

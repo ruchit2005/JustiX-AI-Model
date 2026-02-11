@@ -1,5 +1,32 @@
 # VerdicTech AI Engine - API Documentation
 
+## Overview
+
+The VerdicTech AI Engine is an intelligent legal training system featuring a **dual-agent architecture**:
+
+### Dual-Agent System
+- **Lawyer Agent** (Opposing Counsel): Challenges user's arguments, presents counter-evidence, and acts as prosecution
+- **Judge Agent** (Neutral Arbiter): Monitors the conversation and intervenes when the user makes:
+  - **Factual errors**: Claims not supported by case evidence
+  - **Legal errors**: Violations of legal procedures or constitutional rights
+
+### Dual-RAG Architecture
+The system uses two separate vector databases:
+1. **Case-Specific RAG**: Contains facts, evidence, and details from the current case
+2. **Legal Laws RAG**: Contains constitutional laws, legal procedures, and guidelines
+
+Both agents have access to both knowledge bases, enabling them to ground responses in case facts while citing legal authority.
+
+### Intelligent Role Switching
+On each turn:
+1. System analyzes user statement for errors using LLM
+2. **If errors detected** → Judge intervenes with educational correction
+3. **If no errors** → Lawyer responds with challenging counter-arguments
+
+This creates a realistic legal training environment where users learn from mistakes while building advocacy skills.
+
+---
+
 ## Base URL
 ```
 http://localhost:8000
@@ -67,59 +94,114 @@ curl -X POST http://localhost:8000/api/ai/init_case \
 
 ---
 
-### 3. Chat Turn
+### 3. Initialize Legal Laws
 
-**Endpoint:** `POST /api/ai/turn`
+**Endpoint:** `POST /api/ai/init_legal_laws`
 
-**Description:** Process a conversation turn using RAG. The AI retrieves relevant facts from the case and generates a response as opposing counsel or judge.
+**Description:** Initialize the legal laws vector database with constitutional laws, procedures, and guidelines. This creates a separate knowledge base that both agents (Lawyer and Judge) can reference.
 
 **Request Body:**
 ```json
 {
-  "case_id": "string (required) - Case identifier",
-  "user_text": "string (required) - User's argument or statement",
-  "history": [
-    {
-      "role": "string - 'user' or 'assistant'",
-      "content": "string - Message content"
-    }
-  ]
+  "legal_text": "string (required) - Full text of constitutional laws and legal guidelines",
+  "collection_name": "string (optional) - Collection name, defaults to 'legal_laws'"
 }
 ```
 
 **Example Request:**
 ```bash
-curl -X POST http://localhost:8000/api/ai/turn \
+curl -X POST http://localhost:8000/api/ai/init_legal_laws \
   -H "Content-Type: application/json" \
   -d '{
-    "case_id": "case_123",
-    "user_text": "My client was not at the scene.",
-    "history": [
-      {"role": "user", "content": "I move to dismiss..."},
-      {"role": "assistant", "content": "Motion denied..."}
-    ]
+    "legal_text": "Article I: Right to Legal Counsel...",
+    "collection_name": "legal_laws"
   }'
 ```
 
 **Response:**
 ```json
 {
-  "reply_text": "Objection! GPS data from your client's phone places him within 100 meters of the crime scene at 10:43 PM.",
-  "speaker": "Lawyer",
-  "emotion": "Aggressive"
+  "message": "Legal laws vectorized successfully",
+  "collection_name": "legal_laws",
+  "chunks_processed": 42
 }
 ```
 
-**Speaker Types:**
-- `Lawyer` - Opposing counsel
-- `Judge` - Neutral arbiter
-- `System` - Error or system message
+**Status Codes:**
+- `200 OK` - Legal laws initialized successfully
+- `500 Internal Server Error` - Failed to process legal text
 
-**Emotion Types:**
-- `Assertive` - Confident, professional
-- `Aggressive` - Forceful objection
-- `Questioning` - Probing, inquisitive
-- `Neutral` - Calm, matter-of-fact
+---
+
+### 4. Chat Turn (Dual-Agent System)
+
+**Endpoint:** `POST /api/ai/turn`
+
+**Description:** Process a conversation turn using RAG with intelligent dual-agent system. The AI dynamically switches between **Lawyer** (opposing counsel) and **Judge** (neutral arbiter) roles based on user behavior:
+- **Lawyer responds** when user makes valid legal arguments
+- **Judge intervenes** when user makes factual errors or violates legal procedures
+
+**Request Body:**
+```json
+{
+  "case_id": "string (required) - Case identifier",
+  "user_statement": "string (required) - User's argument or statement",
+  "turn_number": "integer (required) - Current turn number"
+}
+```
+
+**Example Request (Normal Lawyer Response):**
+```bash
+curl -X POST http://localhost:8000/api/ai/turn \
+  -H "Content-Type: application/json" \
+  -d '{
+    "case_id": "case_123",
+    "user_statement": "I believe the GPS evidence is unreliable due to signal interference in urban areas.",
+    "turn_number": 1
+  }'
+```
+
+**Response (Lawyer):**
+```json
+{
+  "agent_role": "lawyer",
+  "agent_response": "While you raise an interesting technical point about GPS accuracy, the data shows your client's phone was consistently near the crime scene for 45 minutes, not just a brief ping. Multiple cell towers triangulated the location. How do you explain this sustained presence?",
+  "case_context_used": "GPS data from phone records; Cell tower triangulation data",
+  "legal_context_used": "GPS and Electronic Evidence standards",
+  "errors_detected": false
+}
+```
+
+**Example Request (Triggering Judge Intervention):**
+```bash
+curl -X POST http://localhost:8000/api/ai/turn \
+  -H "Content-Type: application/json" \
+  -d '{
+    "case_id": "case_123",
+    "user_statement": "I will force my client to testify even though they do not want to.",
+    "turn_number": 2
+  }'
+```
+
+**Response (Judge Intervention):**
+```json
+{
+  "agent_role": "judge",
+  "agent_response": "Counselor, I must stop you there. You cannot compel your client to testify against their will. The Fifth Amendment protects your client's right against self-incrimination. As their attorney, you must respect their decision whether or not to take the stand. This is a fundamental constitutional protection.",
+  "case_context_used": "",
+  "legal_context_used": "Fifth Amendment: Right against self-incrimination; Attorney Conduct standards",
+  "errors_detected": true
+}
+```
+
+**Agent Roles:**
+- `lawyer` - Opposing counsel (prosecution). Challenges user's arguments, presses on weaknesses, presents counter-evidence
+- `judge` - Neutral arbiter. Intervenes when user makes factual errors or violates legal procedures. Educates on proper legal conduct
+
+**Dual-Agent Logic:**
+- System analyzes user statement for factual/legal errors
+- **If errors detected** → Judge responds with correction and guidance
+- **If no errors** → Lawyer responds with counter-arguments and challenges
 
 **Status Codes:**
 - `200 OK` - Response generated successfully
@@ -127,7 +209,7 @@ curl -X POST http://localhost:8000/api/ai/turn \
 
 ---
 
-### 4. Analyze Performance
+### 5. Analyze Performance
 
 **Endpoint:** `POST /api/ai/analyze`
 
@@ -209,20 +291,33 @@ Currently no rate limits. Implement in production:
 ## Data Flow
 
 ```
-1. Initialize Case
+1. Initialize Legal Laws (One-time setup)
+   Node.js → POST /init_legal_laws → Python
+   Python → Split text → Embeddings → Qdrant (legal_laws collection)
+   Python → Confirmation → Node.js
+
+2. Initialize Case (Per case)
    Node.js → POST /init_case → Python
-   Python → Split text → Embeddings → Qdrant
-   Python → GPT-4 summary → Node.js
+   Python → Split text → Embeddings → Qdrant (case collection)
+   Python → GPT-3.5 summary → Node.js
 
-2. Chat Turn
+3. Chat Turn (Dual-Agent System)
    Node.js → POST /turn → Python
-   Python → Query Qdrant → Retrieve context
-   Python → GPT-4 generation → Node.js
-   Node.js → TTS → Audio → VR
+   
+   Python → Query Qdrant (case collection) → Retrieve case context
+   Python → Query Qdrant (legal_laws collection) → Retrieve legal context
+   Python → GPT-3.5 error detection → Analyze user statement
+   
+   IF errors detected:
+     Python → Generate Judge response (with legal citations) → Node.js
+   ELSE:
+     Python → Generate Lawyer response (with case facts) → Node.js
+   
+   Node.js → TTS → Audio → VR Application
 
-3. Analysis
+4. Analysis
    Node.js → POST /analyze → Python
-   Python → GPT-4 evaluation → Node.js
+   Python → GPT-3.5 evaluation → Node.js
    Node.js → Save to database → Display to user
 ```
 
@@ -247,11 +342,19 @@ class AIEngineClient {
     return response.data;
   }
 
-  async chatTurn(caseId, userText, history = []) {
+  async initLegalLaws(legalText, collectionName = 'legal_laws') {
+    const response = await axios.post(`${this.apiURL}/init_legal_laws`, {
+      legal_text: legalText,
+      collection_name: collectionName
+    });
+    return response.data;
+  }
+
+  async chatTurn(caseId, userStatement, turnNumber) {
     const response = await axios.post(`${this.apiURL}/turn`, {
       case_id: caseId,
-      user_text: userText,
-      history: history
+      user_statement: userStatement,
+      turn_number: turnNumber
     });
     return response.data;
   }
@@ -267,17 +370,27 @@ class AIEngineClient {
 // Usage
 const aiEngine = new AIEngineClient();
 
+// Initialize legal laws (once at startup)
+const legalInit = await aiEngine.initLegalLaws(constitutionalLawsText);
+console.log('Legal laws loaded:', legalInit.chunks_processed, 'chunks');
+
 // Initialize a case
 const initResult = await aiEngine.initCase('case_123', pdfText);
-console.log('Summary:', initResult.summary);
+console.log('Case summary:', initResult.summary);
 
-// Chat
-const chatResult = await aiEngine.chatTurn('case_123', 'My client is innocent.');
-console.log('AI:', chatResult.reply_text);
+// Chat with dual-agent system
+const turn1 = await aiEngine.chatTurn('case_123', 'I want to present an alibi defense.', 1);
+console.log(`${turn1.agent_role}:`, turn1.agent_response);
+// Output: "lawyer: An alibi defense requires solid corroboration..."
 
-// Analyze
+const turn2 = await aiEngine.chatTurn('case_123', 'I will coach my witness on what to say.', 2);
+console.log(`${turn2.agent_role}:`, turn2.agent_response);
+// Output: "judge: Counselor! You cannot coach witnesses. That violates legal ethics..."
+
+// Analyze performance
 const analysis = await aiEngine.analyze(transcript);
 console.log('Score:', analysis.score);
+console.log('Feedback:', analysis.feedback);
 ```
 
 ---

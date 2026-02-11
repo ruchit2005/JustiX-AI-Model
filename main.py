@@ -74,8 +74,9 @@ else:
     )
     logger.info(f"Connected to local Qdrant at {QDRANT_HOST}:{QDRANT_PORT}")
 
-# In-memory storage for vector stores (per case)
-vector_stores: Dict[str, Qdrant] = {}
+# In-memory storage for vector stores
+vector_stores: Dict[str, Qdrant] = {}  # Case-specific RAG
+legal_laws_store: Optional[Qdrant] = None  # Legal laws and guidelines RAG
 
 # ==================== REQUEST/RESPONSE MODELS ====================
 
@@ -87,6 +88,14 @@ class InitCaseResponse(BaseModel):
     message: str
     summary: str
 
+class InitLegalLawsRequest(BaseModel):
+    legal_text: str = Field(..., description="Constitutional laws, guidelines, and legal procedures text")
+
+class InitLegalLawsResponse(BaseModel):
+    message: str
+    collection_name: str
+    chunks_processed: int
+
 class ChatMessage(BaseModel):
     role: str = Field(..., description="Role: 'user' or 'assistant'")
     content: str = Field(..., description="Message content")
@@ -97,9 +106,9 @@ class TurnRequest(BaseModel):
     history: List[ChatMessage] = Field(default=[], description="Chat history")
 
 class TurnResponse(BaseModel):
-    reply_text: str
-    speaker: str = Field(default="Lawyer", description="'Lawyer' or 'Judge'")
-    emotion: Optional[str] = Field(default="Assertive", description="Emotion for VR animation")
+    speaker: str = Field(..., description="'Judge' or 'Opposing Lawyer'")
+    reply_text: str = Field(..., description="AI response text")
+    emotion: str = Field(default="neutral", description="Emotion for VR animation (neutral, aggressive, questioning, authoritative)")
 
 class AnalyzeRequest(BaseModel):
     transcript: List[ChatMessage] = Field(..., description="Full conversation transcript")
@@ -129,7 +138,7 @@ def create_collection_if_not_exists(collection_name: str):
         raise
 
 def get_relevant_context(case_id: str, query: str, top_k: int = 3) -> str:
-    """Retrieve relevant context from vector store"""
+    """Retrieve relevant context from case vector store"""
     if case_id not in vector_stores:
         return ""
     
@@ -141,6 +150,59 @@ def get_relevant_context(case_id: str, query: str, top_k: int = 3) -> str:
     except Exception as e:
         logger.error(f"Error retrieving context: {e}")
         return ""
+
+def get_legal_laws_context(query: str, top_k: int = 2) -> str:
+    """Retrieve relevant legal laws and guidelines"""
+    if legal_laws_store is None:
+        return ""
+    
+    try:
+        retriever = legal_laws_store.as_retriever(search_kwargs={"k": top_k})
+        docs = retriever.invoke(query)
+        context = "\n\n".join([doc.page_content for doc in docs])
+        return context
+    except Exception as e:
+        logger.error(f"Error retrieving legal laws: {e}")
+        return ""
+
+def detect_factual_errors(user_text: str, case_context: str, legal_context: str) -> tuple[bool, str]:
+    """Detect if user is making factual errors or procedural mistakes"""
+    detection_prompt = f"""You are a legal expert analyzing a statement for factual accuracy and legal procedure.
+
+CASE FACTS:
+{case_context}
+
+LEGAL GUIDELINES:
+{legal_context}
+
+USER STATEMENT:
+{user_text}
+
+CRITICAL: Only flag as ERROR if the statement contains SPECIFIC, VERIFIABLE problems:
+1. Makes a SPECIFIC factual claim that DIRECTLY CONTRADICTS case evidence (e.g., "The video shows X" when video shows Y)
+2. Explicitly violates legal ethics or procedure (e.g., "I will coach my witness", "I'll force client to testify")
+3. Misrepresents evidence that exists in the case
+
+DO NOT flag as error:
+- General strategic statements ("I want to present an alibi", "I'll challenge the evidence")
+- Opinions or beliefs ("I believe the timeline is flawed")
+- Valid legal tactics
+- Questions or procedural requests
+
+Respond with ONLY:
+- "ERROR: [brief explanation]" if there's a CLEAR, SPECIFIC violation
+- "OK" if statement is legally sound or just strategic/general
+"""
+    
+    try:
+        response = llm.invoke(detection_prompt)
+        result = response.content.strip()
+        
+        if result.startswith("ERROR:"):
+            return True, result.replace("ERROR:", "").strip()
+        return False, ""
+    except:
+        return False, ""
 
 # ==================== ENDPOINTS ====================
 
@@ -215,11 +277,66 @@ async def init_case(request: InitCaseRequest):
         logger.error(f"Error in init_case: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to initialize case: {str(e)}")
 
+@app.post("/api/ai/init_legal_laws", response_model=InitLegalLawsResponse)
+async def init_legal_laws(request: InitLegalLawsRequest):
+    """
+    Initialize the legal laws and guidelines RAG system.
+    This should be called once at startup or when updating legal database.
+    """
+    global legal_laws_store
+    
+    try:
+        logger.info("Initializing legal laws database")
+        
+        # Split text into chunks
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=800,
+            chunk_overlap=150,
+            separators=["\n\n", "\n", ". ", " ", ""]
+        )
+        chunks = text_splitter.split_text(request.legal_text)
+        logger.info(f"Split legal text into {len(chunks)} chunks")
+        
+        # Create collection for legal laws
+        collection_name = "legal_laws_guidelines"
+        create_collection_if_not_exists(collection_name)
+        
+        # Create vector store
+        if QDRANT_URL:
+            legal_laws_store = Qdrant.from_texts(
+                texts=chunks,
+                embedding=embeddings,
+                collection_name=collection_name,
+                url=QDRANT_URL,
+                api_key=QDRANT_API_KEY
+            )
+        else:
+            legal_laws_store = Qdrant.from_texts(
+                texts=chunks,
+                embedding=embeddings,
+                collection_name=collection_name,
+                host=QDRANT_HOST,
+                port=QDRANT_PORT
+            )
+        
+        logger.info(f"Legal laws database initialized with {len(chunks)} chunks")
+        
+        return InitLegalLawsResponse(
+            message="Legal laws database initialized successfully",
+            collection_name=collection_name,
+            chunks_processed=len(chunks)
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in init_legal_laws: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to initialize legal laws: {str(e)}")
+
 @app.post("/api/ai/turn", response_model=TurnResponse)
 async def chat_turn(request: TurnRequest):
     """
     Handle a conversation turn using RAG to generate contextually relevant responses.
-    The AI acts as opposing counsel or judge based on the context.
+    Decides whether Judge or Opposing Lawyer responds based on context.
+    STATELESS: Receives history from Node.js every time.
     """
     try:
         logger.info(f"Processing turn for case: {request.case_id}")
@@ -240,29 +357,70 @@ async def chat_turn(request: TurnRequest):
                 logger.info(f"Loaded case {request.case_id} from Qdrant")
             except Exception as e:
                 return TurnResponse(
+                    speaker="Judge",
                     reply_text="Error: Case not initialized. Please upload the case file first.",
-                    speaker="System",
-                    emotion="Neutral"
+                    emotion="neutral"
                 )
         
-        # Retrieve relevant context from the case
-        context = get_relevant_context(request.case_id, request.user_text, top_k=3)
+        # Retrieve relevant context from case and legal laws
+        case_context = get_relevant_context(request.case_id, request.user_text, top_k=3)
+        legal_context = get_legal_laws_context(request.user_text, top_k=2)
         
-        # Build conversation history string
+        # Build conversation history string for context
         history_str = ""
         for msg in request.history[-4:]:  # Last 4 messages for context
             history_str += f"{msg.role.capitalize()}: {msg.content}\n"
         
-        # Determine speaker (Judge intervenes if user is off-topic or needs guidance)
-        # For now, default to Lawyer (opposing counsel)
-        speaker = "Lawyer"
+        # Check if user is making factual/legal errors (Judge intervention trigger)
+        has_error, error_explanation = detect_factual_errors(request.user_text, case_context, legal_context)
         
-        # Construct system prompt for opposing counsel
-        system_prompt = f"""You are an aggressive and skilled opposing counsel in a legal case.
-Your goal is to challenge the user's arguments using facts from the case.
+        if has_error and legal_context:
+            # JUDGE INTERVENES (NEUTRAL - Only uses legal guidelines)
+            logger.info(f"Judge intervening - Error detected: {error_explanation}")
+            
+            judge_prompt = f"""You are a fair and NEUTRAL judge presiding over this legal case.
+The attorney just made a statement that violates legal procedure or ethics.
+
+LEGAL GUIDELINES:
+{legal_context}
+
+CONVERSATION HISTORY:
+{history_str}
+
+ATTORNEY'S STATEMENT (with violation):
+{request.user_text}
+
+VIOLATION IDENTIFIED:
+{error_explanation}
+
+INSTRUCTIONS FOR NEUTRAL JUDGE:
+- You are NOT advocating for either side (prosecution or defense)
+- Intervene professionally and educate the attorney on proper legal procedure
+- Cite ONLY legal guidelines, constitutional rights, or courtroom procedures
+- Do NOT mention case facts or evidence (you're not arguing the case)
+- Focus on teaching proper legal conduct
+- Keep response under 40 words
+- Be authoritative but educational
+- Start with "Counsel," or "I must intervene,"
+
+Generate your NEUTRAL judicial intervention:"""
+            
+            response = llm.invoke(judge_prompt)
+            reply_text = response.content
+            speaker = "Judge"
+            emotion = "authoritative"
+            
+        else:
+            # OPPOSING LAWYER RESPONDS
+            # Analyze conversation context to determine appropriate response type
+            lawyer_prompt = f"""You are an aggressive and skilled opposing counsel in a legal case.
+Your goal is to challenge the user's arguments using facts from the case and legal precedent.
 
 CASE FACTS:
-{context}
+{case_context}
+
+LEGAL GUIDELINES:
+{legal_context}
 
 CONVERSATION HISTORY:
 {history_str}
@@ -272,30 +430,32 @@ USER'S CURRENT ARGUMENT:
 
 INSTRUCTIONS:
 - Refute the user's argument using specific facts from the case
-- Be brief and impactful (maximum 30 words)
-- Start with "Objection!" when appropriate
+- Cite legal guidelines when applicable
+- Be brief and impactful (maximum 35 words)
+- Start with "Objection!" when you're challenging a factual claim
 - Use legal terminology but remain clear
 - Point out logical flaws or missing evidence
 - Be assertive but professional
 
-Generate your response:"""
+Generate your opposition response:"""
+            
+            response = llm.invoke(lawyer_prompt)
+            reply_text = response.content
+            speaker = "Opposing Lawyer"
+            
+            # Determine emotion based on response content
+            if "Objection" in reply_text or "!" in reply_text:
+                emotion = "aggressive"
+            elif "?" in reply_text:
+                emotion = "questioning"
+            else:
+                emotion = "neutral"
         
-        # Generate response
-        response = llm.invoke(system_prompt)
-        reply_text = response.content
-        
-        # Determine emotion based on response content
-        emotion = "Assertive"
-        if "Objection" in reply_text:
-            emotion = "Aggressive"
-        elif "?" in reply_text:
-            emotion = "Questioning"
-        
-        logger.info(f"Generated response for case {request.case_id}")
+        logger.info(f"Generated {speaker} response for case {request.case_id}")
         
         return TurnResponse(
-            reply_text=reply_text,
             speaker=speaker,
+            reply_text=reply_text,
             emotion=emotion
         )
         
