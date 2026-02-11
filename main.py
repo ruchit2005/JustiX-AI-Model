@@ -111,7 +111,11 @@ class TurnResponse(BaseModel):
     emotion: str = Field(default="neutral", description="Emotion for VR animation (neutral, aggressive, questioning, authoritative)")
 
 class AnalyzeRequest(BaseModel):
-    transcript: List[ChatMessage] = Field(..., description="Full conversation transcript")
+    transcript: List[Dict] = Field(..., description="Full conversation transcript - accepts {role,content} or {speaker,text} format")
+    
+    class Config:
+        # Allow extra fields from MongoDB (like _id, timestamp)
+        extra = "allow"
 
 class AnalyzeResponse(BaseModel):
     score: int = Field(..., ge=0, le=100, description="Performance score (0-100)")
@@ -165,9 +169,9 @@ def get_legal_laws_context(query: str, top_k: int = 2) -> str:
         logger.error(f"Error retrieving legal laws: {e}")
         return ""
 
-def detect_factual_errors(user_text: str, case_context: str, legal_context: str) -> tuple[bool, str]:
-    """Detect if user is making factual errors or procedural mistakes"""
-    detection_prompt = f"""You are a legal expert analyzing a statement for factual accuracy and legal procedure.
+def detect_judge_intervention_needed(user_text: str, case_context: str, legal_context: str, turn_count: int) -> tuple[bool, str]:
+    """Detect if Judge should intervene for educational/procedural guidance"""
+    detection_prompt = f"""You are a Judge in an educational legal training simulation. Analyze if you need to intervene.
 
 CASE FACTS:
 {case_context}
@@ -178,28 +182,31 @@ LEGAL GUIDELINES:
 USER STATEMENT:
 {user_text}
 
-CRITICAL: Only flag as ERROR if the statement contains SPECIFIC, VERIFIABLE problems:
-1. Makes a SPECIFIC factual claim that DIRECTLY CONTRADICTS case evidence (e.g., "The video shows X" when video shows Y)
-2. Explicitly violates legal ethics or procedure (e.g., "I will coach my witness", "I'll force client to testify")
-3. Misrepresents evidence that exists in the case
+JUDGE SHOULD INTERVENE if the statement:
+1. Violates legal procedure or ethics (e.g., "I'll coach my witness", "force client to testify")
+2. Makes factual claims that contradict case evidence (e.g., "video shows X" when it doesn't exist)
+3. Shows misunderstanding of legal rights (e.g., misquoting constitutional protections)
+4. Contains improper courtroom conduct (e.g., attacking opposing counsel personally)
+5. Shows lack of understanding about burden of proof or legal standards
+6. Makes procedurally incorrect requests
 
-DO NOT flag as error:
-- General strategic statements ("I want to present an alibi", "I'll challenge the evidence")
-- Opinions or beliefs ("I believe the timeline is flawed")
-- Valid legal tactics
-- Questions or procedural requests
+JUDGE LETS LAWYER HANDLE (responds with OK) if:
+- General strategic arguments ("I challenge the GPS reliability")
+- Valid legal tactics ("I want to present alibi defense")
+- Proper procedural requests ("I'd like to cross-examine")
+- Normal case argumentation
 
-Respond with ONLY:
-- "ERROR: [brief explanation]" if there's a CLEAR, SPECIFIC violation
-- "OK" if statement is legally sound or just strategic/general
+Respond with:
+- "INTERVENE: [explanation]" if Judge should provide guidance/correction
+- "OK" if Opposing Lawyer should respond normally
 """
     
     try:
         response = llm.invoke(detection_prompt)
         result = response.content.strip()
         
-        if result.startswith("ERROR:"):
-            return True, result.replace("ERROR:", "").strip()
+        if result.startswith("INTERVENE:"):
+            return True, result.replace("INTERVENE:", "").strip()
         return False, ""
     except:
         return False, ""
@@ -371,39 +378,54 @@ async def chat_turn(request: TurnRequest):
         for msg in request.history[-4:]:  # Last 4 messages for context
             history_str += f"{msg.role.capitalize()}: {msg.content}\n"
         
-        # Check if user is making factual/legal errors (Judge intervention trigger)
-        has_error, error_explanation = detect_factual_errors(request.user_text, case_context, legal_context)
+        # Check if Judge should intervene (errors, violations, or teaching moments)
+        turn_count = len(request.history) // 2  # Approximate turn number
+        should_intervene, intervention_reason = detect_judge_intervention_needed(
+            request.user_text, case_context, legal_context, turn_count
+        )
         
-        if has_error and legal_context:
+        # Also check for periodic Judge guidance (educational intervention)
+        # Judge provides procedural guidance on first turn or occasionally
+        if not should_intervene and legal_context:
+            # First user statement should often get Judge acknowledgment
+            if turn_count == 0 and any(word in request.user_text.lower() for word in ['your honor', 'judge', 'present']):
+                should_intervene = True
+                intervention_reason = "Judge acknowledges opening statement and sets courtroom expectations"
+        
+        if should_intervene:
             # JUDGE INTERVENES (NEUTRAL - Only uses legal guidelines)
-            logger.info(f"Judge intervening - Error detected: {error_explanation}")
+            logger.info(f"Judge intervening - Reason: {intervention_reason}")
             
-            judge_prompt = f"""You are a fair and NEUTRAL judge presiding over this legal case.
-The attorney just made a statement that violates legal procedure or ethics.
+            # If no legal context available, use general procedural knowledge
+            legal_guidance = legal_context if legal_context else "General legal procedure and courtroom conduct standards"
+            
+            judge_prompt = f"""You are a fair and NEUTRAL judge presiding over this legal training simulation.
+The attorney made a statement that requires your guidance or correction.
 
-LEGAL GUIDELINES:
-{legal_context}
+LEGAL GUIDELINES AVAILABLE:
+{legal_guidance}
 
 CONVERSATION HISTORY:
 {history_str}
 
-ATTORNEY'S STATEMENT (with violation):
+ATTORNEY'S STATEMENT:
 {request.user_text}
 
-VIOLATION IDENTIFIED:
-{error_explanation}
+REASON FOR YOUR INTERVENTION:
+{intervention_reason}
 
 INSTRUCTIONS FOR NEUTRAL JUDGE:
 - You are NOT advocating for either side (prosecution or defense)
-- Intervene professionally and educate the attorney on proper legal procedure
-- Cite ONLY legal guidelines, constitutional rights, or courtroom procedures
+- Provide professional guidance and educate on proper legal procedure
+- Cite legal guidelines, constitutional rights, or courtroom procedures when relevant
 - Do NOT mention case facts or evidence (you're not arguing the case)
 - Focus on teaching proper legal conduct
 - Keep response under 40 words
 - Be authoritative but educational
-- Start with "Counsel," or "I must intervene,"
+- For opening statements, acknowledge professionally: "Proceed, Counsel. Please present your argument."
+- For violations, start with "Counsel," or "I must intervene,"
 
-Generate your NEUTRAL judicial intervention:"""
+Generate your NEUTRAL judicial response:"""
             
             response = llm.invoke(judge_prompt)
             reply_text = response.content
@@ -413,8 +435,7 @@ Generate your NEUTRAL judicial intervention:"""
         else:
             # OPPOSING LAWYER RESPONDS
             # Analyze conversation context to determine appropriate response type
-            lawyer_prompt = f"""You are an aggressive and skilled opposing counsel in a legal case.
-Your goal is to challenge the user's arguments using facts from the case and legal precedent.
+            lawyer_prompt = f"""You are the opposing counsel in a legal case. Present your arguments professionally like in a real courtroom.
 
 CASE FACTS:
 {case_context}
@@ -428,16 +449,18 @@ CONVERSATION HISTORY:
 USER'S CURRENT ARGUMENT:
 {request.user_text}
 
-INSTRUCTIONS:
-- Refute the user's argument using specific facts from the case
-- Cite legal guidelines when applicable
-- Be brief and impactful (maximum 35 words)
-- Start with "Objection!" when you're challenging a factual claim
+INSTRUCTIONS FOR REALISTIC COURTROOM BEHAVIOR:
+- Present your case arguments using specific facts and evidence
+- Respond thoughtfully to the user's points with counter-arguments
+- Build on your previous arguments in the conversation
+- Only say "Objection!" if there's a clear procedural violation (rare)
+- Most responses should be: "Your Honor, [present argument/evidence]..." or "But the evidence clearly shows..."
+- Be professional and persuasive, not constantly combative
 - Use legal terminology but remain clear
-- Point out logical flaws or missing evidence
-- Be assertive but professional
+- Keep responses under 40 words
+- Take turns presenting your case, like a real trial
 
-Generate your opposition response:"""
+Generate your professional opposition response:"""
             
             response = llm.invoke(lawyer_prompt)
             reply_text = response.content
@@ -473,17 +496,36 @@ async def analyze(request: AnalyzeRequest):
         logger.info("Analyzing transcript")
         
         # Convert transcript to readable format
+        # Support both formats: {role, content} and {speaker, text}
         transcript_text = ""
         for msg in request.transcript:
-            transcript_text += f"{msg.role.capitalize()}: {msg.content}\n\n"
+            # MongoDB/Node.js format: {speaker: 'User'|'Opposing Lawyer'|'Judge', text: '...', _id, timestamp}
+            if 'speaker' in msg and 'text' in msg:
+                speaker = msg['speaker']
+                text = msg['text']
+            # Standard format: {role: 'user'|'assistant', content: '...'}
+            elif 'role' in msg and 'content' in msg:
+                speaker = "User" if msg['role'] == "user" else "AI"
+                text = msg['content']
+            else:
+                # Skip malformed messages
+                logger.warning(f"Skipping malformed message in transcript: {msg}")
+                continue
+            
+            transcript_text += f"{speaker}: {text}\n\n"
+        
+        if not transcript_text:
+            raise HTTPException(status_code=400, detail="Transcript is empty or malformed")
         
         # Create analysis prompt
-        analysis_prompt = f"""You are an expert legal educator evaluating a law student's performance in a mock trial exercise.
+        analysis_prompt = f"""You are a legal mentor providing personal, direct feedback to your student after their mock trial performance.
 
-Analyze the following conversation transcript and provide:
+Write your feedback as if you're speaking DIRECTLY to the student in a one-on-one conversation. Use "you", "your", "you've" throughout.
+
+Analyze this conversation transcript and provide:
 1. A numerical score from 0-100
-2. Detailed feedback on their performance
-3. A brief summary (2-3 sentences)
+2. Personal feedback addressed directly to the student
+3. A brief personal summary (2-3 sentences)
 
 EVALUATION CRITERIA:
 - Legal reasoning and argument structure (30%)
@@ -495,10 +537,25 @@ EVALUATION CRITERIA:
 TRANSCRIPT:
 {transcript_text}
 
+CRITICAL INSTRUCTION: Write ONLY in second person. Imagine you're talking directly to the student.
+
+✅ CORRECT examples:
+- "You demonstrated strong legal reasoning when you cited Article 21..."
+- "Your argument would have been stronger if you had referenced specific case facts..."
+- "You handled the judge's correction professionally by acknowledging and clarifying..."
+- "I noticed you maintained good professional demeanor throughout..."
+
+❌ NEVER write like this:
+- "The student demonstrated..." (WRONG - too formal and distant)
+- "Their argument..." (WRONG - use "your" instead)
+- "The law student shows..." (WRONG - address them directly as "you")
+
+Think of this as a personal coaching session where you're talking TO the student, not ABOUT them.
+
 Provide your analysis in this EXACT format:
 SCORE: [number]
-FEEDBACK: [detailed feedback paragraph]
-SUMMARY: [2-3 sentence summary]"""
+FEEDBACK: [Write as if speaking directly to the student using "you/your"]
+SUMMARY: [2-3 sentences speaking directly to student using "you/your"]"""
         
         # Generate analysis
         analysis_response = llm.invoke(analysis_prompt)
@@ -547,6 +604,12 @@ SUMMARY: [2-3 sentence summary]"""
     except Exception as e:
         logger.error(f"Error in analyze: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to analyze transcript: {str(e)}")
+
+# Alias route for backend compatibility (expects /analyze instead of /api/ai/analyze)
+@app.post("/analyze", response_model=AnalyzeResponse)
+async def analyze_alias(request: AnalyzeRequest):
+    """Alias for /api/ai/analyze endpoint for backend compatibility"""
+    return await analyze(request)
 
 # ==================== MAIN ====================
 

@@ -23,12 +23,14 @@ The AI Engine uses a **dual-agent system** where two different AI personalities 
 - ✅ Argues for the prosecution
 - ✅ Conversation history for context
 
+**Behavior:** Presents arguments professionally like in a real courtroom. Takes turns making points, responds to user's arguments thoughtfully. Only objects when absolutely necessary (procedural violations).
+
 **Example Lawyer Response:**
 ```json
 {
   "speaker": "Opposing Lawyer",
-  "reply_text": "Objection! The GPS data clearly shows your client's phone was within 100 meters of the crime scene at 10:43 PM.",
-  "emotion": "aggressive"
+  "reply_text": "Your Honor, the GPS data shows the defendant's phone was within 100 meters of the crime scene at 10:43 PM. This contradicts the alibi claim.",
+  "emotion": "neutral"
 }
 ```
 
@@ -150,8 +152,8 @@ The response format is the same regardless of which agent responds:
 ```json
 {
   "speaker": "Opposing Lawyer",
-  "reply_text": "Objection! The GPS data shows consistent positioning for 45 minutes across multiple cell towers. How do you explain this sustained presence?",
-  "emotion": "aggressive"
+  "reply_text": "Your Honor, the GPS data shows consistent positioning for 45 minutes across multiple cell towers. The defense must explain this sustained presence at the scene.",
+  "emotion": "questioning"
 }
 ```
 
@@ -172,20 +174,75 @@ The response format is the same regardless of which agent responds:
 
 ---
 
+## Endpoint 4: Analyze Performance (Post-Session)
+
+**Route:** `POST /analyze` or `POST /api/ai/analyze`
+
+**Purpose:** Analyze the full conversation transcript and provide scoring/feedback after session ends.
+
+**When to Call:** When user completes a VR training session.
+
+**Request:**
+```json
+{
+  "transcript": [
+    {
+      "speaker": "User",
+      "text": "Your Honor, I present the case...",
+      "_id": {"$oid": "..."},
+      "timestamp": {"$date": "..."}
+    },
+    {
+      "speaker": "Opposing Lawyer",
+      "text": "Objection, Your Honor...",
+      "_id": {"$oid": "..."},
+      "timestamp": {"$date": "..."}
+    }
+  ]
+}
+```
+
+**Response:**
+```json
+{
+  "score": 78,
+  "summary": "The student demonstrated good legal reasoning but needs to improve evidence application.",
+  "feedback": "Detailed performance analysis covering legal reasoning, use of facts, clarity, objection handling, and professionalism."
+}
+```
+
+**Backend Integration:**
+```javascript
+const generatePostSessionAnalysis = async (transcript) => {
+  try {
+    const response = await axios.post(`${AI_SERVICE_URL}/analyze`, { transcript });
+    return response.data;  // { score, summary, feedback }
+  } catch (error) {
+    return { summary: "Analysis Failed", feedback: "Check Python Server", score: 0 };
+  }
+};
+```
+
+**Important:** Transcript accepts MongoDB format with `{speaker, text, _id, timestamp}` or standard format with `{role, content}`.
+
+---
+
 ## Agent Selection Logic (Automatic - "The Director Pattern")
 
 The system automatically decides which agent responds based on user's statement and conversation context:
 
 ### Opposing Lawyer Responds When:
-- User makes valid legal arguments
-- User challenges evidence properly
-- User follows legal procedure
-- No violations detected
+- User makes valid legal arguments (presents counter-arguments)
+- User challenges evidence properly (responds with case facts)
+- User follows legal procedure (continues case presentation)
+- No violations detected (normal courtroom flow)
+
+**Lawyer's Style:** Professional case presentation, thoughtful rebuttals, evidence-based arguments. Like a real trial where both sides take turns presenting their case.
 
 **Examples:**
-- "I want to present an alibi defense"
-- "The GPS evidence may be unreliable"
-- "I'd like to cross-examine the witness"
+- "I want to present an alibi defense" → "Your Honor, the State has timeline evidence that contradicts..."
+- "The GPS evidence may be unreliable" → "But the data was verified by multiple cell towers..."
+- "I'd like to cross-examine the witness" → "Your Honor, our witness testimony already establishes..."
 
 ### Judge Intervenes When:
 - User makes specific factual claims that contradict case evidence
@@ -332,6 +389,13 @@ if (response.data.speaker === 'Opposing Lawyer') {
 
 ## Summary Table
 
+| Endpoint | Route | Purpose | When to Call | Key Parameters |
+|----------|-------|---------|--------------|----------------|
+| **Initialize Legal Laws** | `POST /api/ai/init_legal_laws` | Load Judge's knowledge base | Once at app startup | `legal_text`, `collection_name` |
+| **Initialize Case** | `POST /api/ai/init_case` | Load Lawyer's knowledge base | Once per case | `case_id`, `pdf_text` |
+| **Chat Turn** | `POST /api/ai/turn` | Get AI response (Judge or Lawyer) | Every user statement | `case_id`, `user_text`, `history` |
+| **Analyze Performance** | `POST /analyze` | Score & feedback on session | After session ends | `transcript` |
+
 | Agent | Endpoint That Loads Context | Context Type | Can Cite Case Facts? | Purpose | Emotion Types |
 |-------|----------------------------|--------------|---------------------|---------|---------------|
 | **Judge** | `POST /api/ai/init_legal_laws` | Constitutional laws, procedures, ethics | ❌ NO | Enforce legal rules, educate on procedure | authoritative, neutral |
@@ -384,7 +448,7 @@ history.push(
 
 // Turn 2: User makes factual claim
 const turn2 = await turn('case_123', 'The GPS data shows my client was at home', history);
-// Response: { speaker: "Opposing Lawyer", reply_text: "Objection! The GPS data shows...", emotion: "aggressive" }
+// Response: { speaker: "Opposing Lawyer", reply_text: "Your Honor, the GPS data actually places the defendant within 100 meters of the crime scene, not at their residence.", emotion: "neutral" }
 history.push(
   { role: 'user', content: 'The GPS data shows my client was at home' },
   { role: 'assistant', content: turn2.reply_text }
