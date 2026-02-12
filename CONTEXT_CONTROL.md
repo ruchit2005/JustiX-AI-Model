@@ -23,13 +23,13 @@ The AI Engine uses a **dual-agent system** where two different AI personalities 
 - ✅ Argues for the prosecution
 - ✅ Conversation history for context
 
-**Behavior:** Presents arguments professionally like in a real courtroom. Takes turns making points, responds to user's arguments thoughtfully. Only objects when absolutely necessary (procedural violations).
+**Behavior:** Presents arguments professionally like in a real courtroom. Takes turns making points, responds to user's arguments thoughtfully. Only objects when absolutely necessary (procedural violations). **Cites specific legal sections** when making legal arguments.
 
 **Example Lawyer Response:**
 ```json
 {
   "speaker": "Opposing Lawyer",
-  "reply_text": "Your Honor, the GPS data [Source 1] shows the defendant's phone was within 100 meters of the crime scene at 10:43 PM. This contradicts the alibi claim.",
+  "reply_text": "Your Honor, under Section 65B of the Evidence Act, the GPS data [Source 1] must be authenticated. The records show the defendant's phone at the crime scene at 10:43 PM.",
   "emotion": "neutral",
   "citations": [
     "Source 1: GPS data shows defendant's phone at crime scene at 10:43 PM via cell tower triangulation..."
@@ -41,7 +41,7 @@ The AI Engine uses a **dual-agent system** where two different AI personalities 
 **Has Access To:**
 - ❌ NO case facts or evidence
 - ✅ Legal guidelines and constitutional law ONLY
-- ✅ Can cite legal procedures and ethics rules
+- ✅ Can cite legal procedures and ethics rules with **specific section/article numbers**
 - ✅ Does NOT argue for either side
 - ✅ Conversation history for context
 
@@ -49,8 +49,9 @@ The AI Engine uses a **dual-agent system** where two different AI personalities 
 ```json
 {
   "speaker": "Judge",
-  "reply_text": "Counsel, you cannot force your client to testify. The Fifth Amendment protects against self-incrimination.",
-  "emotion": "authoritative"
+  "reply_text": "Counsel, under the Fifth Amendment, you cannot compel your client to testify. This protects against self-incrimination.",
+  "emotion": "authoritative",
+  "citations": []
 }
 ```
 

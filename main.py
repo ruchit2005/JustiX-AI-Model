@@ -183,11 +183,51 @@ def get_legal_laws_context(query: str, top_k: int = 2) -> str:
         logger.error(f"Error retrieving legal laws: {e}")
         return ""
 
+def validate_case_relevance(user_text: str, case_context: str) -> tuple[bool, str]:
+    """Check if user's statement is relevant to the actual case or mentions unrelated cases/facts"""
+    validation_prompt = f"""You are validating if a lawyer's statement is relevant to the current case.
+
+ACTUAL CASE FACTS:
+{case_context}
+
+LAWYER'S STATEMENT:
+{user_text}
+
+CRITICAL VALIDATION:
+Check if the lawyer mentions:
+1. Different cases entirely (e.g., "Trump case", "Epstein case", other real-world cases)
+2. Facts/evidence NOT present in the actual case facts above
+3. Parties/defendants/victims NOT in this case
+4. Completely unrelated legal topics
+
+EXAMPLES OF IRRELEVANT STATEMENTS:
+- "This is like the Donald Trump case..." (different case)
+- "The Epstein investigation shows..." (different case)
+- "Biden v. Trump established..." (different case)
+- "The witness John Smith testified..." (if John Smith not in case facts)
+- Mentioning evidence that doesn't exist in case facts
+
+RESPOND WITH:
+- "OFF_TOPIC: [explanation of what's irrelevant]" if statement mentions unrelated cases or facts not in case
+- "RELEVANT" if statement discusses the actual case facts provided
+"""
+    
+    try:
+        response = llm.invoke(validation_prompt)
+        result = response.content.strip()
+        
+        if result.startswith("OFF_TOPIC:"):
+            return True, result.replace("OFF_TOPIC:", "").strip()
+        return False, ""
+    except:
+        return False, ""
+
 def detect_judge_intervention_needed(user_text: str, case_context: str, legal_context: str, turn_count: int) -> tuple[bool, str]:
     """Detect if Judge should intervene for educational/procedural guidance"""
+    
     detection_prompt = f"""You are a Judge in an educational legal training simulation. Analyze if you need to intervene.
 
-CASE FACTS:
+ACTUAL CASE FACTS:
 {case_context}
 
 LEGAL GUIDELINES:
@@ -196,13 +236,15 @@ LEGAL GUIDELINES:
 USER STATEMENT:
 {user_text}
 
-JUDGE SHOULD INTERVENE if the statement:
-1. Violates legal procedure or ethics (e.g., "I'll coach my witness", "force client to testify")
-2. Makes factual claims that contradict case evidence (e.g., "video shows X" when it doesn't exist)
-3. Shows misunderstanding of legal rights (e.g., misquoting constitutional protections)
-4. Contains improper courtroom conduct (e.g., attacking opposing counsel personally)
-5. Shows lack of understanding about burden of proof or legal standards
-6. Makes procedurally incorrect requests
+JUDGE MUST INTERVENE if the statement:
+1. References DIFFERENT cases or people not in this case (e.g., "Trump case", "Epstein", etc.)
+2. Mentions evidence/facts that DON'T EXIST in the actual case facts above
+3. Violates legal procedure or ethics (e.g., "I'll coach my witness", "force client to testify")
+4. Makes factual claims that contradict the actual case evidence
+5. Shows misunderstanding of legal rights or constitutional protections
+6. Contains improper courtroom conduct
+7. Discusses unrelated legal topics not connected to this case
+8. Goes completely off-topic from the case being tried
 
 JUDGE LETS LAWYER HANDLE (responds with OK) if:
 - General strategic arguments ("I challenge the GPS reliability")
@@ -393,6 +435,47 @@ async def chat_turn(request: TurnRequest):
         for msg in request.history[-4:]:  # Last 4 messages for context
             history_str += f"{msg.role.capitalize()}: {msg.content}\n"
         
+        # CRITICAL: First check if user is discussing the actual case or going off-topic
+        if case_context:  # Only validate if we have case context
+            is_off_topic, off_topic_reason = validate_case_relevance(request.user_text, case_context)
+            
+            if is_off_topic:
+                # JUDGE IMMEDIATELY INTERVENES - User mentioned unrelated case/facts
+                logger.warning(f"OFF-TOPIC DETECTED: {off_topic_reason}")
+                
+                judge_prompt = f"""You are a Judge presiding over a specific legal case in a training simulation.
+The lawyer just made a statement that is COMPLETELY OFF-TOPIC and mentions facts or cases NOT relevant to this trial.
+
+ACTUAL CASE BEING TRIED:
+{case_context[:500]}...
+
+LAWYER'S OFF-TOPIC STATEMENT:
+{request.user_text}
+
+WHY IT'S OFF-TOPIC:
+{off_topic_reason}
+
+INSTRUCTIONS:
+- Firmly but professionally redirect the lawyer back to the ACTUAL case
+- CITE relevant rules of professional conduct or procedure (e.g., "Rule 3.4", "CPC Section 165")
+- Say: "Counsel, under [Rule/Section], you must confine yourself to the facts of THIS case. We are discussing [brief case description]. Return to the actual evidence."
+- Keep it under 40 words
+- Be authoritative and clear
+- Do NOT engage with the off-topic content at all
+
+EXAMPLE: "Counsel, under CPC Section 165, you must stay within the scope of this trial. We are here to discuss [case]. Focus on the actual facts and evidence."
+
+Generate your redirection with legal citation:"""
+                
+                response = llm.invoke(judge_prompt)
+                
+                return TurnResponse(
+                    speaker="Judge",
+                    reply_text=response.content,
+                    emotion="authoritative",
+                    citations=[]
+                )
+        
         # Check if Judge should intervene (errors, violations, or teaching moments)
         turn_count = len(request.history) // 2  # Approximate turn number
         should_intervene, intervention_reason = detect_judge_intervention_needed(
@@ -432,15 +515,22 @@ REASON FOR YOUR INTERVENTION:
 INSTRUCTIONS FOR NEUTRAL JUDGE:
 - You are NOT advocating for either side (prosecution or defense)
 - Provide professional guidance and educate on proper legal procedure
-- Cite legal guidelines, constitutional rights, or courtroom procedures when relevant
+- ALWAYS cite specific legal provisions: "Section X", "Article Y", "Rule Z", "Amendment N"
+- Reference actual laws by name and number (e.g., "Section 302 IPC", "Article 21", "Fifth Amendment")
+- Use your legal knowledge to cite relevant statutes, constitutional articles, or procedural rules
 - Do NOT mention case facts or evidence (you're not arguing the case)
-- Focus on teaching proper legal conduct
-- Keep response under 40 words
+- Focus on teaching proper legal conduct with specific legal citations
+- Keep response under 45 words
 - Be authoritative but educational
 - For opening statements, acknowledge professionally: "Proceed, Counsel. Please present your argument."
 - For violations, start with "Counsel," or "I must intervene,"
 
-Generate your NEUTRAL judicial response:""" 
+EXAMPLES:
+- "Counsel, under Section 313 of the Criminal Procedure Code, the accused has the right to..."
+- "That violates Article 20(3) regarding self-incrimination."
+- "The Fifth Amendment protects against compelled testimony."
+
+Generate your NEUTRAL judicial response with specific legal citations:""" 
             
             response = llm.invoke(judge_prompt)
             reply_text = response.content
@@ -451,9 +541,9 @@ Generate your NEUTRAL judicial response:"""
         else:
             # OPPOSING LAWYER RESPONDS
             # Analyze conversation context to determine appropriate response type
-            lawyer_prompt = f"""You are the opposing counsel in a legal case. Present your arguments professionally like in a real courtroom.
+            lawyer_prompt = f"""You are the opposing counsel in THIS SPECIFIC legal case. Present your arguments professionally.
 
-CASE FACTS:
+ACTUAL CASE FACTS FOR THIS TRIAL:
 {case_context}
 
 LEGAL GUIDELINES:
@@ -465,19 +555,33 @@ CONVERSATION HISTORY:
 USER'S CURRENT ARGUMENT:
 {request.user_text}
 
+CRITICAL GUARDRAILS:
+- ONLY discuss facts and evidence from the ACTUAL CASE FACTS above
+- NEVER engage with mentions of other cases (Trump, Epstein, Biden, etc.)
+- If user mentions unrelated facts, say "Objection! That's not part of this case."
+- DO NOT make up facts - only reference what's in the case facts provided
+- Stay strictly focused on THIS case being tried
+
 INSTRUCTIONS FOR REALISTIC COURTROOM BEHAVIOR:
-- Present your case arguments using specific facts and evidence
+- Present your case arguments using ONLY the specific facts and evidence from THIS case
 - When citing case facts, reference them using [Source 1], [Source 2], etc.
-- Respond thoughtfully to the user's points with counter-arguments
+- CITE SPECIFIC LAWS AND SECTIONS when making legal arguments
+- Use your legal knowledge to reference: "Section X", "Article Y", "IPC Section Z", "CrPC Section N"
+- Respond thoughtfully to the user's points with counter-arguments backed by law
 - Build on your previous arguments in the conversation
 - Only say "Objection!" if there's a clear procedural violation (rare)
-- Most responses should be: "Your Honor, [present argument/evidence]..." or "But the evidence clearly shows..."
+- Most responses should be: "Your Honor, under Section X, the evidence shows..." or "Article Y establishes that..."
 - Be professional and persuasive, not constantly combative
-- Use legal terminology but remain clear
-- Keep responses under 40 words
+- Use legal terminology with specific statutory references
+- Keep responses under 45 words
 - Take turns presenting your case, like a real trial
 
-Generate your professional opposition response (include [Source X] citations when referencing case facts):"""
+EXAMPLES:
+- "Your Honor, Section 65B of the Evidence Act requires electronic evidence to be certified..."
+- "Under Article 21, the prosecution must prove..."
+- "IPC Section 420 clearly defines the elements of fraud, which are present here..."
+
+Generate your professional opposition response with legal citations (include [Source X] for case facts):"""
             
             response = llm.invoke(lawyer_prompt)
             reply_text = response.content
