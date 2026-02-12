@@ -109,6 +109,7 @@ class TurnResponse(BaseModel):
     speaker: str = Field(..., description="'Judge' or 'Opposing Lawyer'")
     reply_text: str = Field(..., description="AI response text")
     emotion: str = Field(default="neutral", description="Emotion for VR animation (neutral, aggressive, questioning, authoritative)")
+    citations: List[str] = Field(default=[], description="Source references from case documents")
 
 class AnalyzeRequest(BaseModel):
     transcript: List[Dict] = Field(..., description="Full conversation transcript - accepts {role,content} or {speaker,text} format")
@@ -141,19 +142,32 @@ def create_collection_if_not_exists(collection_name: str):
         logger.error(f"Error creating collection: {e}")
         raise
 
-def get_relevant_context(case_id: str, query: str, top_k: int = 3) -> str:
-    """Retrieve relevant context from case vector store"""
+def get_relevant_context(case_id: str, query: str, top_k: int = 3) -> tuple[str, List[str]]:
+    """Retrieve relevant context from case vector store with citations"""
     if case_id not in vector_stores:
-        return ""
+        return "", []
     
     try:
         retriever = vector_stores[case_id].as_retriever(search_kwargs={"k": top_k})
         docs = retriever.invoke(query)
-        context = "\n\n".join([doc.page_content for doc in docs])
-        return context
+        
+        # Build context with citation markers
+        context_parts = []
+        citations = []
+        
+        for i, doc in enumerate(docs, 1):
+            citation_marker = f"[Source {i}]"
+            context_parts.append(f"{citation_marker} {doc.page_content}")
+            
+            # Extract citation info from metadata or content
+            citation_text = doc.page_content[:100] + "..." if len(doc.page_content) > 100 else doc.page_content
+            citations.append(f"Source {i}: {citation_text}")
+        
+        context = "\n\n".join(context_parts)
+        return context, citations
     except Exception as e:
         logger.error(f"Error retrieving context: {e}")
-        return ""
+        return "", []
 
 def get_legal_laws_context(query: str, top_k: int = 2) -> str:
     """Retrieve relevant legal laws and guidelines"""
@@ -366,11 +380,12 @@ async def chat_turn(request: TurnRequest):
                 return TurnResponse(
                     speaker="Judge",
                     reply_text="Error: Case not initialized. Please upload the case file first.",
-                    emotion="neutral"
+                    emotion="neutral",
+                    citations=[]
                 )
         
-        # Retrieve relevant context from case and legal laws
-        case_context = get_relevant_context(request.case_id, request.user_text, top_k=3)
+        # Retrieve relevant context from case and legal laws with citations
+        case_context, case_citations = get_relevant_context(request.case_id, request.user_text, top_k=3)
         legal_context = get_legal_laws_context(request.user_text, top_k=2)
         
         # Build conversation history string for context
@@ -425,12 +440,13 @@ INSTRUCTIONS FOR NEUTRAL JUDGE:
 - For opening statements, acknowledge professionally: "Proceed, Counsel. Please present your argument."
 - For violations, start with "Counsel," or "I must intervene,"
 
-Generate your NEUTRAL judicial response:"""
+Generate your NEUTRAL judicial response:""" 
             
             response = llm.invoke(judge_prompt)
             reply_text = response.content
             speaker = "Judge"
             emotion = "authoritative"
+            citations = []  # Judge doesn't cite case facts
             
         else:
             # OPPOSING LAWYER RESPONDS
@@ -451,6 +467,7 @@ USER'S CURRENT ARGUMENT:
 
 INSTRUCTIONS FOR REALISTIC COURTROOM BEHAVIOR:
 - Present your case arguments using specific facts and evidence
+- When citing case facts, reference them using [Source 1], [Source 2], etc.
 - Respond thoughtfully to the user's points with counter-arguments
 - Build on your previous arguments in the conversation
 - Only say "Objection!" if there's a clear procedural violation (rare)
@@ -460,11 +477,12 @@ INSTRUCTIONS FOR REALISTIC COURTROOM BEHAVIOR:
 - Keep responses under 40 words
 - Take turns presenting your case, like a real trial
 
-Generate your professional opposition response:"""
+Generate your professional opposition response (include [Source X] citations when referencing case facts):"""
             
             response = llm.invoke(lawyer_prompt)
             reply_text = response.content
             speaker = "Opposing Lawyer"
+            citations = case_citations if case_citations else []
             
             # Determine emotion based on response content
             if "Objection" in reply_text or "!" in reply_text:
@@ -479,7 +497,8 @@ Generate your professional opposition response:"""
         return TurnResponse(
             speaker=speaker,
             reply_text=reply_text,
-            emotion=emotion
+            emotion=emotion,
+            citations=citations
         )
         
     except Exception as e:

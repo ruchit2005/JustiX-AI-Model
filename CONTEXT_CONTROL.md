@@ -29,8 +29,11 @@ The AI Engine uses a **dual-agent system** where two different AI personalities 
 ```json
 {
   "speaker": "Opposing Lawyer",
-  "reply_text": "Your Honor, the GPS data shows the defendant's phone was within 100 meters of the crime scene at 10:43 PM. This contradicts the alibi claim.",
-  "emotion": "neutral"
+  "reply_text": "Your Honor, the GPS data [Source 1] shows the defendant's phone was within 100 meters of the crime scene at 10:43 PM. This contradicts the alibi claim.",
+  "emotion": "neutral",
+  "citations": [
+    "Source 1: GPS data shows defendant's phone at crime scene at 10:43 PM via cell tower triangulation..."
+  ]
 }
 ```
 
@@ -152,8 +155,12 @@ The response format is the same regardless of which agent responds:
 ```json
 {
   "speaker": "Opposing Lawyer",
-  "reply_text": "Your Honor, the GPS data shows consistent positioning for 45 minutes across multiple cell towers. The defense must explain this sustained presence at the scene.",
-  "emotion": "questioning"
+  "reply_text": "Your Honor, the GPS data [Source 1] shows consistent positioning for 45 minutes across multiple cell towers. The defense must explain this sustained presence at the scene.",
+  "emotion": "questioning",
+  "citations": [
+    "Source 1: GPS data shows defendant's phone was within 100 meters of the crime scene at 10:43 PM...",
+    "Source 2: Security footage confirms person matching defendant's description entering store..."
+  ]
 }
 ```
 
@@ -162,11 +169,14 @@ The response format is the same regardless of which agent responds:
 {
   "speaker": "Judge",
   "reply_text": "Counsel, I must intervene. You cannot coach witnesses on their testimony. That violates legal ethics.",
-  "emotion": "authoritative"
+  "emotion": "authoritative",
+  "citations": []
 }
 ```
 
-**Emotion Values:**
+**Note:** Judge responses do not include case fact citations (only legal procedure references).
+
+**Emotion Values:****
 - `"neutral"` - Calm, matter-of-fact
 - `"aggressive"` - Forceful, objecting
 - `"questioning"` - Probing, inquisitive
